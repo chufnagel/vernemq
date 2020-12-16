@@ -456,7 +456,7 @@ deliver_retained({MP, _} = SubscriberId, Topic, QoS, SubOpts, _) ->
     vmq_retain_srv:match_fold(
       fun ({T, #retain_msg{payload = Payload,
                            properties = Properties,
-                           expiry_ts = ExpiryTs}}, _) ->
+                           expiry_ts = ExpiryTs}}, _,_) ->
               Msg = #vmq_msg{routing_key=T,
                              payload=retain_pre(Payload),
                              retain=true,
@@ -469,7 +469,7 @@ deliver_retained({MP, _} = SubscriberId, Topic, QoS, SubOpts, _) ->
               Msg1 = maybe_add_sub_id({QoS,SubOpts}, Msg),
               maybe_delete_expired(ExpiryTs, MP, Topic),
               vmq_queue:enqueue(QPid, {deliver, QoS, Msg1});
-          ({T, Payload}, _) when is_binary(Payload) ->
+          ({T, Payload}, _, _) when is_binary(Payload) ->
               %% compatibility with old style retained messages.
               Msg = #vmq_msg{routing_key=T,
                              payload=retain_pre(Payload),

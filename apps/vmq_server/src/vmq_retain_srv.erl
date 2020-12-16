@@ -35,8 +35,7 @@
 -record(state, {}).
 
 -define(RETAIN_DB, {vmq, retain}).
--define(RETAIN_CACHE, ?MODULE).
--define(RETAIN_UPDATE, vmq_retain_srv_updates).
+-define(RETAIN_CACHE, vmq_retain_cache).
 
 %%%===================================================================
 %%% API functions
@@ -54,23 +53,18 @@ start_link() ->
         true ->
             ignore;
         false ->
-            ets:new(?RETAIN_CACHE, [public, ordered_set, named_table,
-                                    {read_concurrency, true},
-                                    {write_concurrency, true}]),
-            ets:new(?RETAIN_UPDATE, [public, named_table,
-                                     {write_concurrency, true}])
+            ets_cache:new(?RETAIN_CACHE, [{life_time, infinity}, {max_size, 1000},  {type, ordered_set}])
+            % TODO: make 'life_time' and 'max_size' configurable in Verne conf file
     end,
     gen_server2:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 delete(MP, RoutingKey) ->
     Key = {MP, RoutingKey},
-    ets:delete(?RETAIN_CACHE, Key),
-    ets:update_counter(?RETAIN_UPDATE, Key, 1, {Key, 0}).
+    vmq_metadata:delete(?RETAIN_DB, Key).
 
 insert(MP, RoutingKey, Message) ->
     Key = {MP, RoutingKey},
-    ets:insert(?RETAIN_CACHE, {Key, Message}),
-    ets:update_counter(?RETAIN_UPDATE, Key, 1, {Key, 0}).
+    ets_cache:update(?RETAIN_CACHE, Key, Message, fun() -> vmq_metadata:put(?RETAIN_DB, Key, Message) end).
 
 match_fold(FoldFun, Acc, MP, Topic) ->
     case has_wildcard(Topic) of
@@ -80,23 +74,33 @@ match_fold(FoldFun, Acc, MP, Topic) ->
             %% the first topic element which will cause the entire
             %% table to be scanned.
             MatchTopic = topic2ms(Topic),
-            MS = [{{{MP, MatchTopic}, '_'}, [], ['$_']}],
+            MS = [{{{MP, MatchTopic}, '_', '_'}, [], ['$_']}],
             lists:foldl(
-              fun({{_M,T}, Payload}, AccAcc) ->
+              fun({{_M,T}, Payload, _}, AccAcc) ->
                       case vmq_topic:match(T, Topic) of
                           true ->
-                              FoldFun({T, Payload}, AccAcc);
+                              FoldFun({T, Payload}, AccAcc, []);
                           false ->
                               AccAcc
                       end;
                  (_, AccAcc) -> AccAcc
               end, Acc, ets:select(?RETAIN_CACHE, MS));
         false ->
-            case ets:lookup(?RETAIN_CACHE, {MP, Topic}) of
-                 [] -> Acc;
-                 [{_, Payload}] ->
-                    FoldFun({Topic, Payload}, Acc)
+            Key = {MP, Topic},
+            case ets_cache:lookup(?RETAIN_CACHE, Key, fun() -> read_value_if_not_cached(Key) end) of
+                {cache, {retain_msg, Payload, _,_}} -> 
+                    FoldFun({Topic, Payload}, Acc, []);
+                {retain_msg, Payload, _,_}  -> FoldFun({Topic, Payload}, Acc,[]);
+                undefined -> Acc;
+                {_, Payload, _} ->
+                    FoldFun({Topic, Payload}, Acc, [])
             end
+    end.
+
+read_value_if_not_cached(Key) -> 
+    case vmq_metadata:get(?RETAIN_DB, Key) of
+        undefined -> undefined;
+        Message -> {cache, Message}
     end.
 
 -dialyzer({no_improper_lists, topic2ms/1}).
@@ -116,12 +120,7 @@ stats() ->
         undefined -> {0, 0};
         V ->
             MC = ets:info(?RETAIN_CACHE, memory),
-            case ets:info(?RETAIN_UPDATE, memory) of
-                undefined ->
-                    {V, MC*erlang:system_info(wordsize)};
-                MU ->
-                    {V, (MC+MU)*erlang:system_info(wordsize)}
-            end
+            {V, MC*erlang:system_info(wordsize)}
     end.
 
 
@@ -142,14 +141,14 @@ stats() ->
 %%--------------------------------------------------------------------
 init([]) ->
     vmq_metadata:subscribe(?RETAIN_DB),
-    vmq_metadata:fold(?RETAIN_DB,
-      fun({MPTopic, '$deleted'}, _) ->
-              ets:delete(?RETAIN_CACHE, MPTopic);
-         ({MPTopic, Msg}, _) ->
-              ets:insert(?RETAIN_CACHE, [{MPTopic, Msg}])
-      end, ok),
-    erlang:send_after(vmq_config:get_env(retain_persist_interval, 1000),
-                      self(), persist),
+    % vmq_metadata:fold(?RETAIN_DB,
+    %   fun({MPTopic, '$deleted'}, _) ->
+    %           ets:delete(?RETAIN_CACHE, MPTopic);
+    %      ({MPTopic, Msg}, _) ->
+    %           ets:insert(?RETAIN_CACHE, [{MPTopic, Msg}])
+    %   end, ok),
+    % erlang:send_after(vmq_config:get_env(retain_persist_interval, 1000),
+    %                   self(), persist),
     {ok, #state{}}.
 
 %%--------------------------------------------------------------------
@@ -193,17 +192,12 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info({deleted, ?RETAIN_DB, Key, _Val}, State) ->
-    ets:delete(?RETAIN_CACHE, Key),
+    ets_cache:delete(?RETAIN_CACHE, Key, [node()]),
     {noreply, State};
 handle_info({updated, ?RETAIN_DB, Key, _OldVal, NewVal}, State) ->
-    ets:insert(?RETAIN_CACHE, {Key, NewVal}),
+    ets_cache:insert(?RETAIN_CACHE, Key, NewVal),
     {noreply, State};
-handle_info(persist, State) ->
-    ets:foldl(fun persist/2, ignore, ?RETAIN_UPDATE),
-    ets:match_delete(?RETAIN_UPDATE, {'_', 0}),
-    erlang:send_after(vmq_config:get_env(retain_persist_interval, 1000),
-                      self(), persist),
-    {noreply, State};
+
 handle_info(_, State) ->
     {noreply, State}.
 
@@ -235,21 +229,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-persist({Key, Counter}, _) ->
-    case ets:lookup(?RETAIN_CACHE, Key) of
-        [] ->
-            %% cache line was deleted
-            vmq_metadata:delete(?RETAIN_DB, Key);
-        [{_, Message}] ->
-            vmq_metadata:put(?RETAIN_DB, Key, Message)
-    end,
-    %% If a concurrent insert happened during the fold then the
-    %% current counter value will be bigger than Counter, So
-    %% decrementing by Counter means the resulting value will be
-    %% greater than zero and the key/value will be persisted in the
-    %% next persistence loop. In other words it is recorded that we
-    %% have persisted Counter updates, but not more than that.
-    ets:update_counter(?RETAIN_UPDATE, Key, -Counter).
 
 has_wildcard([<<"+">>|_]) -> true;
 has_wildcard([<<"#">>]) -> true;

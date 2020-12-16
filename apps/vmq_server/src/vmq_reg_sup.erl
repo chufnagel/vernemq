@@ -40,6 +40,7 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link() ->
+    application:ensure_all_started(cache_tab),
     {ok, Pid} = supervisor:start_link({local, ?MODULE}, ?MODULE, []),
     DefaultRegView = vmq_config:get_env(default_reg_view, vmq_reg_trie),
     RegViews = lists:usort([DefaultRegView|vmq_config:get_env(reg_views, [])]),

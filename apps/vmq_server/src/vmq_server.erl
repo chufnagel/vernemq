@@ -61,7 +61,8 @@ stop() ->
                                           crypto,
                                           ssl,
                                           os_mon,
-                                          lager]],
+                                          lager,
+                                          cache_tab]],
     ok.
 
 -spec wait_until_metadata_has_stopped() -> 'ok'.
