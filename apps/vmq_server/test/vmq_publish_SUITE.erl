@@ -1,11 +1,10 @@
 -module(vmq_publish_SUITE).
 
 -include_lib("vmq_commons/include/vmq_types.hrl").
+-include_lib("vmq_server/include/vmq_metrics.hrl").
 
 -compile(export_all).
 -compile(nowarn_export_all).
-
--include("../src/vmq_metrics.hrl").
 
 %% ===================================================================
 %% common_test callbacks
@@ -191,7 +190,7 @@ publish_b2c_qos2_duplicate_test(Cfg) ->
     ok = expect_alive(PubSocket),
     ok = gen_tcp:close(PubSocket),
 
-    %% verify that we only recieve the first published message and not
+    %% verify that we only receive the first published message and not
     %% the duplicate.
     ExpectF =
         fun(Name, What) ->
@@ -253,7 +252,7 @@ publish_c2b_qos2_duplicate_test(Cfg) ->
     ok = expect_alive(PubSocket),
     ok = gen_tcp:close(PubSocket),
 
-    %% verify that we only recieve the first published message and not
+    %% verify that we only receive the first published message and not
     %% the duplicate.
     ok = mqtt5_v4compat:expect_packet(SubSocket, "publish", RecvPublish, Cfg),
     %%ok = mqtt5_v4compat:expect_packet(SubSocket, "publish", RecvPublish, Cfg),

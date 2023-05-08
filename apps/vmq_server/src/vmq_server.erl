@@ -13,10 +13,13 @@
 %% limitations under the License.
 
 -module(vmq_server).
--export([start/0,
-         start_no_auth/0,
-         start_no_auth/1,
-         stop/0]).
+-export([
+    start/0,
+    start_no_auth/0,
+    start_no_auth/1,
+    stop/0,
+    stop/1
+]).
 
 -spec start_no_auth() -> 'ok'.
 start_no_auth() ->
@@ -46,22 +49,48 @@ start() ->
     start_no_auth(),
     vmq_auth:register_hooks().
 
-
 -spec stop() -> 'ok'.
 stop() ->
+    vmq_ranch_config:stop_all_mqtt_listeners(true),
     application:stop(vmq_server),
     wait_until_metadata_has_stopped(),
-    _ = [application:stop(App) || App <- [vmq_plugin,
-                                          riak_sysmon,
-                                          clique,
-                                          asn1,
-                                          public_key,
-                                          cowboy,
-                                          ranch,
-                                          crypto,
-                                          ssl,
-                                          os_mon,
-                                          lager]],
+    _ = [
+        application:stop(App)
+     || App <- [
+            vmq_plugin,
+            riak_sysmon,
+            clique,
+            asn1,
+            public_key,
+            cowboy,
+            ranch,
+            crypto,
+            ssl,
+            os_mon,
+            lager
+        ]
+    ],
+    ok.
+
+stop(no_wait) ->
+    vmq_ranch_config:stop_all_mqtt_listeners(true),
+    application:stop(vmq_server),
+    _ = [
+        application:stop(App)
+     || App <- [
+            vmq_plugin,
+            riak_sysmon,
+            clique,
+            asn1,
+            public_key,
+            cowboy,
+            ranch,
+            crypto,
+            ssl,
+            os_mon,
+            lager
+        ]
+    ],
     ok.
 
 -spec wait_until_metadata_has_stopped() -> 'ok'.
